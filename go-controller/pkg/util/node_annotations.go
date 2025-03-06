@@ -118,6 +118,9 @@ const (
 
 	// invalidNetworkID signifies its an invalid network id
 	InvalidNetworkID = -1
+
+	// ovnDPUNodeReady mark the node as ready for DPU
+	ovnDPUNodeReady = "k8s.ovn.org/dpu.node.ready"
 )
 
 type L3GatewayConfig struct {
@@ -883,6 +886,16 @@ func GetNodeID(node *kapi.Node) int {
 // NodeIDAnnotationChanged returns true if the ovnNodeID in the corev1.Nodes doesn't match
 func NodeIDAnnotationChanged(oldNode, newNode *corev1.Node) bool {
 	return oldNode.Annotations[ovnNodeID] != newNode.Annotations[ovnNodeID]
+}
+
+// SetDPUNodeReady sets the 'ovnDPUNodeReady' node annotation to an empty string.
+func SetDPUNodeReady(nodeAnnotator kube.Annotator) error {
+	return nodeAnnotator.Set(ovnDPUNodeReady, "")
+}
+
+func HasDPUNodeReady(node *kapi.Node) bool {
+	_, ok := node.Annotations[ovnDPUNodeReady]
+	return ok
 }
 
 // SetNodeZone sets the node's zone in the 'ovnNodeZoneName' node annotation.
