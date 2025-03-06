@@ -1120,6 +1120,40 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 			return err
 		}
 	} else {
+		if config.OvnKubeNode.Mode == types.NodeModeDPUHost {
+			// we should wait for the dpu node to be ready before starting the cni server
+			// this impacts the readiness probe of the ovn-kube-node pod
+			// as it uses `command: ["/usr/bin/ovn-kube-util", "readiness-probe", "-t", "ovnkube-node"]`
+			// which in turn check if the file /etc/cni/net.d/10-ovn-kubernetes.conf exists
+			err = wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, 300*time.Second, true, func(ctx context.Context) (bool, error) {
+				// get nodes
+				nodes, err := nc.Kube.GetNodes()
+				if err != nil {
+					return false, nil
+				}
+
+				// There is no SBDB to connect to in DPU Host mode, so we will just take the default input config zone
+				sbZone := config.Default.Zone
+				if err != nil {
+					return false, nil
+				}
+				ready := true
+				for _, node := range nodes.Items {
+					// if we have a dpu node in the same zone and it is not ready, we should wait
+					if !IsDPUHostMode(&node) && util.GetNodeZone(&node) == sbZone && !util.HasDPUNodeReady(&node) {
+						ready = false
+						break
+					}
+				}
+				if ready {
+					return true, nil
+				}
+				return false, nil
+			})
+			if err != nil {
+				return fmt.Errorf("timed out waiting for the dpu node to be ready: %v", err)
+			}
+		}
 		// start the cni server
 		if err := cniServer.Start(cni.ServerRunDir); err != nil {
 			return err
@@ -1169,6 +1203,17 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 		ovspinning.Run(nc.stopChan)
 	}()
 
+	if config.OvnKubeNode.Mode == types.NodeModeDPU {
+		// annotate the node as ready on dpu mode
+		if err := util.SetDPUNodeReady(nodeAnnotator); err != nil {
+			return fmt.Errorf("failed to set dpu node ready annotation for node %s: %w", nc.name, err)
+		}
+
+		if err := nodeAnnotator.Run(); err != nil {
+			return fmt.Errorf("failed to set node %s annotations: %w", nc.name, err)
+		}
+	}
+
 	klog.Infof("Default node network controller initialized and ready.")
 	return nil
 }
@@ -1176,6 +1221,20 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 // Stop gracefully stops the controller
 // deleteLogicalEntities will never be true for default network
 func (nc *DefaultNodeNetworkController) Stop() {
+	// remove node annotations
+	node, err := nc.Kube.GetNode(nc.name)
+	if err != nil {
+		klog.Infof("Failed to get node %s: %v", nc.name, err)
+		return // node is already gone
+	}
+
+	nodeAnnotator := kube.NewNodeAnnotator(nc.Kube, node.Name)
+	// remove "k8s.ovn.org/dpu.node.ready" annotation
+	util.UnsetDPUNodeReady(nodeAnnotator)
+	if err := nodeAnnotator.Run(); err != nil {
+		klog.Errorf("Failed to remove node annotations: %v", err)
+	}
+
 	close(nc.stopChan)
 	nc.wg.Wait()
 }
@@ -1457,4 +1516,9 @@ func DummyNextHopIPs() []net.IP {
 		nextHops = append(nextHops, config.Gateway.MasqueradeIPs.V6DummyNextHopMasqueradeIP)
 	}
 	return nextHops
+}
+
+func IsDPUHostMode(node *kapi.Node) bool {
+	_, ok := node.Labels["k8s.ovn.org/dpu-host"]
+	return ok
 }
